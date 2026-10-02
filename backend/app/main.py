@@ -12,9 +12,6 @@ from app.services.snowflake import test_connection, get_upload_summary,get_uploa
 
 import tempfile
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-UPLOAD_DIR = BASE_DIR / "uploads"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(
     title="Store Footfall & Sales Analytics API",
