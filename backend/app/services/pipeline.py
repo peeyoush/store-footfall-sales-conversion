@@ -1,5 +1,5 @@
 from pathlib import Path
-
+import tempfile
 from .databricks import (
     create_directory,
     upload_file,
@@ -19,7 +19,10 @@ DATABRICKS_UPLOAD_ROOT = (
     "/Volumes/workspace/capstone_peeyoush/raw/uploads"
 )
 
-UPLOAD_DIR = Path(__file__).resolve().parents[2] / "uploads"
+UPLOAD_DIR = (
+    Path(tempfile.gettempdir())
+    / "store-footfall-uploads"
+)
 
 EXPECTED_FILES = (
     "stores.csv",
