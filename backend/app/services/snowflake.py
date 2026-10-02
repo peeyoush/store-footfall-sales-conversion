@@ -180,3 +180,44 @@ def get_upload_summary(run_id: str):
         connection.close()
 
 
+def get_upload_rows(run_id: str):
+    connection = get_connection()
+
+    try:
+        cursor = connection.cursor()
+
+        cursor.execute(
+            """
+            SELECT
+                store_id,
+                city,
+                format,
+                trade_date,
+                hour,
+                is_weekend,
+                footfall,
+                bills,
+                revenue,
+                conversion_rate,
+                sensor_ok
+            FROM CAPSTONE_DB.ANALYTICS.GOLD_STORE_HOUR_UPLOADS
+            WHERE run_id = %s
+            ORDER BY store_id, trade_date, hour
+            """,
+            (run_id,),
+        )
+
+        columns = [column[0].lower() for column in cursor.description]
+        rows = cursor.fetchall()
+
+        return [
+            {
+                column: value
+                for column, value in zip(columns, row)
+            }
+            for row in rows
+        ]
+
+    finally:
+        cursor.close()
+        connection.close()

@@ -47,6 +47,17 @@ def create_directory(directory_path: str):
 
     response.raise_for_status()
 
+def list_directory(directory_path: str):
+    encoded_path = quote(directory_path, safe="/")
+
+    response = requests.get(
+        f"{DATABRICKS_HOST}/api/2.0/fs/directories{encoded_path}",
+        headers=HEADERS,
+        timeout=30,
+    )
+
+    response.raise_for_status()
+    return response.json()
 
 def upload_file(local_path: str, remote_path: str):
     encoded_path = quote(remote_path, safe="/")

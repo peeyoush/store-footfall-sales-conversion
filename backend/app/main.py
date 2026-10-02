@@ -5,11 +5,12 @@ import csv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.schemas.upload import UploadResponse
+from app.schemas.upload import UploadSessionResponse,FileUploadResponse,ProcessingResponse
 from app.services.databricks import get_job
-from app.services.pipeline import start_upload_pipeline, get_upload_status
-from app.services.snowflake import test_connection, get_upload_summary
+from app.services.pipeline import start_upload_pipeline, get_upload_status, create_upload_run, upload_single_file, get_uploaded_files, start_processing
+from app.services.snowflake import test_connection, get_upload_summary,get_upload_rows
 
+import tempfile
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -134,76 +135,138 @@ def snowflake_health():
             detail=f"Snowflake connection failed: {exc}",
         )
 
+@app.post("/api/upload/start",response_model=UploadSessionResponse,)
+def start_upload():
+    run_id = uuid4().hex
 
-@app.post("/api/upload", response_model=UploadResponse)
-async def upload_files(
-    stores: UploadFile = File(...),
-    footfall: UploadFile = File(...),
-    bills: UploadFile = File(...),
+    try:
+        create_upload_run(run_id)
+
+        return {
+            "success": True,
+            "run_id": run_id,
+            "message": "Upload session created.",
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not create upload session: {exc}",
+        )
+
+@app.post("/api/upload/{run_id}/file",response_model=FileUploadResponse,)
+async def upload_single_csv(
+    run_id: str,
+    file: UploadFile = File(...),
 ):
-    uploaded = [stores, footfall, bills]
+    if len(run_id) != 32:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid run_id.",
+        )
 
-    filenames = {
-        file.filename
-        for file in uploaded
-        if file.filename
-    }
+    if not file.filename:
+        raise HTTPException(
+            status_code=400,
+            detail="Filename is required.",
+        )
 
-    if filenames != EXPECTED_FILES:
+    filename = file.filename
+
+    if filename not in EXPECTED_FILES:
         raise HTTPException(
             status_code=400,
             detail=(
-                "Please upload exactly these files: "
+                "Invalid file. Expected one of: "
                 "stores.csv, footfall.csv, bills.csv"
             ),
         )
 
-    run_id = uuid4().hex
-    run_dir = UPLOAD_DIR / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = None
 
-    files_map = {
-        "stores.csv": stores,
-        "footfall.csv": footfall,
-        "bills.csv": bills,
-    }
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            suffix=".csv",
+            delete=False,
+        ) as temp_file:
+            temp_path = Path(temp_file.name)
 
-    saved_files = []
-    row_counts = {}
+            while True:
+                chunk = await file.read(1024 * 1024)
 
-    for filename, upload in files_map.items():
-        destination = run_dir / filename
+                if not chunk:
+                    break
 
-        content = await upload.read()
-        destination.write_bytes(content)
+                temp_file.write(chunk)
 
-        row_counts[filename] = validate_csv(
-            destination,
+        row_count = validate_csv(
+            temp_path,
             filename,
         )
 
-        saved_files.append(filename)
-
-    try:
-        pipeline_run_id = start_upload_pipeline(
+        result = upload_single_file(
             run_id=run_id,
-            local_upload_dir=run_dir,
+            filename=filename,
+            local_path=temp_path,
         )
+
+        return {
+            "success": True,
+            "run_id": run_id,
+            "filename": filename,
+            "rows": row_count,
+            "remote_path": result["remote_path"],
+        }
+
+    except HTTPException:
+        raise
+
     except Exception as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"Databricks processing could not be started: {exc}",
+            detail=f"Could not upload {filename}: {exc}",
         )
 
-    return UploadResponse(
-        success=True,
-        run_id=run_id,
-        message="Files uploaded, validated, and Databricks processing started.",
-        files=sorted(saved_files),
-        rows=row_counts,
-        pipeline_run_id=pipeline_run_id,
-    )
+    finally:
+        if temp_path and temp_path.exists():
+            temp_path.unlink()
 
+@app.post("/api/upload/{run_id}/process",response_model=ProcessingResponse,)
+def process_uploaded_run(run_id: str):
+    if len(run_id) != 32:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid run_id.",
+        )
+
+    try:
+        uploaded_files = get_uploaded_files(run_id)
+
+        pipeline_run_id = start_processing(run_id)
+
+        return {
+            "success": True,
+            "run_id": run_id,
+            "files": sorted(uploaded_files),
+            "pipeline_run_id": pipeline_run_id,
+            "message": (
+                "All required files are present. "
+                "Databricks processing started."
+            ),
+        }
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not start processing: {exc}",
+        )
 
 @app.get("/api/upload/status/{run_id}/{pipeline_run_id}")
 def upload_processing_status(
@@ -232,4 +295,20 @@ def upload_summary(run_id: str):
         raise HTTPException(
             status_code=502,
             detail=f"Could not retrieve uploaded data: {exc}",
+        )
+@app.get("/api/upload/data/{run_id}")
+def upload_data(run_id: str):
+    try:
+        rows = get_upload_rows(run_id)
+
+        return {
+            "run_id": run_id,
+            "rows": rows,
+            "row_count": len(rows),
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not retrieve uploaded Gold data: {exc}",
         )

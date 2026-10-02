@@ -6,6 +6,7 @@ from .databricks import (
     run_upload_job,
     get_run_status,
     download_file,
+    list_directory,
 )
 
 from .snowflake import (
@@ -27,26 +28,82 @@ EXPECTED_FILES = (
 )
 
 
-def start_upload_pipeline(
-    run_id: str,
-    local_upload_dir: Path,
-) -> int:
+def create_upload_run(run_id: str):
     remote_root = f"{DATABRICKS_UPLOAD_ROOT}/{run_id}"
 
     create_directory(remote_root + "/")
 
-    for filename in EXPECTED_FILES:
-        local_path = local_upload_dir / filename
-        remote_path = f"{remote_root}/{filename}"
+    return remote_root
 
-        upload_file(
-            str(local_path),
-            remote_path,
+
+def upload_single_file(
+    run_id: str,
+    filename: str,
+    local_path: Path,
+):
+    if filename not in EXPECTED_FILES:
+        raise ValueError(f"Unexpected upload file: {filename}")
+
+    remote_root = f"{DATABRICKS_UPLOAD_ROOT}/{run_id}"
+    remote_path = f"{remote_root}/{filename}"
+
+    upload_file(
+        str(local_path),
+        remote_path,
+    )
+
+    return {
+        "filename": filename,
+        "run_id": run_id,
+        "remote_path": remote_path,
+    }
+
+
+def get_uploaded_files(run_id: str):
+    remote_root = f"{DATABRICKS_UPLOAD_ROOT}/{run_id}"
+
+    data = list_directory(remote_root)
+
+    contents = data.get("contents", [])
+
+    return [
+        item["name"]
+        for item in contents
+        if not item.get("is_directory", False)
+    ]
+
+
+def start_processing(run_id: str):
+    uploaded_files = set(get_uploaded_files(run_id))
+    required_files = set(EXPECTED_FILES)
+
+    missing_files = sorted(required_files - uploaded_files)
+
+    if missing_files:
+        raise ValueError(
+            "Cannot start processing. Missing files: "
+            + ", ".join(missing_files)
         )
 
     job_response = run_upload_job(run_id)
 
     return int(job_response["run_id"])
+
+
+def start_upload_pipeline(
+    run_id: str,
+    local_upload_dir: Path,
+) -> int:
+    create_upload_run(run_id)
+
+    for filename in EXPECTED_FILES:
+        upload_single_file(
+            run_id=run_id,
+            filename=filename,
+            local_path=local_upload_dir / filename,
+        )
+
+    return start_processing(run_id)
 
 
 def finalize_upload_pipeline(
